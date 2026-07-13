@@ -6,6 +6,9 @@ export const runtime = 'nodejs';
 
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' });
 
+// Define models in priority order
+const MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-3.1-flash-lite'];
+
 export async function POST(req: NextRequest) {
   if (!process.env.GEMINI_API_KEY) {
     return NextResponse.json(
@@ -54,33 +57,52 @@ If the audio is silent, unintelligible, or contains no speech, set sourceText an
 translatedText to an empty string, detectedLanguage to "unknown", and spokenSide to "A".
 Respond with JSON only.`;
 
-    const response = await genAI.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [
-        {
-          role: 'user',
-          parts: [{ inlineData: { mimeType, data: base64Audio } }, { text: prompt }],
-        },
-      ],
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            spokenSide: { type: Type.STRING, enum: ['A', 'B'] },
-            detectedLanguage: { type: Type.STRING },
-            sourceText: { type: Type.STRING },
-            translatedText: { type: Type.STRING },
-          },
-          required: ['spokenSide', 'detectedLanguage', 'sourceText', 'translatedText'],
-        },
-        temperature: 0.3,
+    const requestContents = [
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType, data: base64Audio } }, { text: prompt }],
       },
-    });
+    ];
 
-    const raw = response.text;
+    const requestConfig = {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          spokenSide: { type: Type.STRING, enum: ['A', 'B'] },
+          detectedLanguage: { type: Type.STRING },
+          sourceText: { type: Type.STRING },
+          translatedText: { type: Type.STRING },
+        },
+        required: ['spokenSide', 'detectedLanguage', 'sourceText', 'translatedText'],
+      },
+      temperature: 0.3,
+    };
+
+    let response;
+    let lastError: unknown;
+
+    // Iterate through models until one succeeds
+    for (const model of MODELS_TO_TRY) {
+      try {
+        response = await genAI.models.generateContent({
+          model,
+          contents: requestContents,
+          config: requestConfig,
+        });
+
+        if (response?.text) {
+          break; // Successfully got a response, exit the fallback loop
+        }
+      } catch (err) {
+        console.warn(`Model ${model} failed, attempting fallback...`, err);
+        lastError = err;
+      }
+    }
+
+    const raw = response?.text;
     if (!raw) {
-      return NextResponse.json({ error: 'Gemini returned an empty response.' }, { status: 502 });
+      throw lastError || new Error('All model fallbacks failed to generate a response.');
     }
 
     const parsed = JSON.parse(raw);
